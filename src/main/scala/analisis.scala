@@ -17,10 +17,16 @@ import org.apache.spark.ml.classification.{RandomForestClassificationModel, Rand
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
+import org.apache.spark.ml.tuning.{ParamGridBuilder, CrossValidator}
 import org.apache.spark.ml.feature.PCA
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.sql.DataFrame
-
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+import org.apache.spark.mllib.util.MLUtils
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.mllib.linalg.SparseVector
+import org.apache.spark.ml.PipelineModel
+import java.io._
 
 object analisis {
 
@@ -36,24 +42,29 @@ object analisis {
   }
 
 
-def featureAnalyzer(dataFrameIn: DataFrame, ns: Int,np: Int, nc: Int, label: String): DataFrame = {
-//dataFrameIn: a dataframe of the feature set to analyze
-//ns: number of samples to do the Bagging
-//np: number of partitions
-//nc: number of classes
-// first we calculate the sampling rate
-     val sampling=(1.0)/ns.toDouble
-     val onlyNolabel = (sqlContext.sql("SELECT * FROM "+txDF +" WHERE fraude ==0")
-     .coalesce(numPartitions).sample(true,tasaMuestreo))
-    val pca = new PCA()
-    .setInputCol("features")
-    .setOutputCol("pcaFeatures")
-    .setK(nc)
-    .fit(dataFrame)
-    val pcaDF = pca.transform(dataFrame)
-    return pcaDF }    
 
 
+def saveRedTable(dataFrameIn: DataFrame, nam: String) : Unit  = {
+     val temp=(dataFrameIn
+     .drop(col("moneda"))
+     .drop(col("tipo_tarjeta"))
+     .drop(col("fraudeEx"))
+     .drop(col("fraudeSq"))
+     .drop(col("noLabel"))
+     .drop(col("fecha"))
+     .drop(col("metodo_pago"))
+     .drop(col("numero_tarjeta"))
+     .drop(col("retail_code"))
+     .drop(col("documento_cliente"))
+     .drop(col("id_sector"))
+     .drop(col("id_comercio"))
+     .drop(col("banco_emisor"))
+     .drop(col("ubicacion"))
+     .drop(col("email"))
+     .drop(col("categoria_tarjeta"))
+     )
+     temp.write.mode(SaveMode.Overwrite).saveAsTable(nam)
+}
 
 
 
@@ -68,100 +79,74 @@ def featureAnalyzer(dataFrameIn: DataFrame, ns: Int,np: Int, nc: Int, label: Str
      val conf = new SparkConf().setAppName("AnalisisP2P")
      val sc = new SparkContext(conf)
      val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
+     // getting the parameters
+     val numPartitions=args(1).toInt
+     val numOfTrees= args(3).toInt
+     val arrayNTres=args.slice(4,4+numOfTrees)
+     var trees = arrayNTres.map(_.toInt)
+     val maxDepth=args(2).toInt
+     if (args(0)=="y")
+     {
+     logger.info("........The Original database will be reading and saving...............")
+     // Load and parse the data file, converting it to a DataFrame.
+     logger.info("..........reading...............")
+     var original = sqlContext.sql("SELECT * FROM datosfinales").coalesce(numPartitions)
+     saveRedTable(original,"datosFinalesRed")
+     }
      
-     val numPartitions=50
-     /*val tasaMuestreo=0.1
-     val fraudDF="nuevosfraudes"
-     val txDF="fraudsidentified"
-     logger.info("..........creacion del subcojnunto...............")
-     val onlyFrauds = sqlContext.sql("SELECT * FROM "+fraudDF).coalesce(numPartitions)
-     logger.info("..........legales...............")
-     val onlyLegal = (sqlContext.sql("SELECT * FROM "+txDF +" WHERE fraude ==-1")
-     .coalesce(numPartitions).sample(false,tasaMuestreo))
-     logger.info("..........no labels...............")
-     val onlyNolabel = (sqlContext.sql("SELECT * FROM "+txDF +" WHERE fraude ==0")
-     .coalesce(numPartitions).sample(false,tasaMuestreo))
-     logger.info("..........Union...............")
-     val dfOut= onlyFrauds.unionAll(onlyLegal).unionAll(onlyNolabel)
-     dfOut.write.mode(SaveMode.Overwrite).saveAsTable("muestraTx")
-     
-     val avgByEmail = (sqlContext.sql("SELECT * FROM  muestraemail").coalesce(numPartitions)
-     .select(col("idsesion").alias("idemail"), col("6horas").alias("6hemail"), col("24horas").alias("24hemail"),
-      col("15dias").alias("15demail"), col("30dias").alias("30demail"),
-      col("60dias").alias("60demail"), col("365dias").alias("365demail")))
-     val avgByCard = (sqlContext.sql("SELECT * FROM  muestratarjeta").coalesce(numPartitions)
-     .select(col("idsesion").alias("idcard"), col("6horas").alias("6hcard"), col("24horas").alias("24hcard"),
-      col("15dias").alias("15dcard"), col("30dias").alias("30dcard"),
-      col("60dias").alias("60dcard"), col("365dias").alias("365dcard")))
-     var joinDF=avgByEmail.join(avgByCard,avgByEmail("idemail")===avgByCard("idcard")).drop(col("idemail"))
-      logger.info("..........Fin Join card y email ...............")
-     joinDF.write.mode(SaveMode.Overwrite).saveAsTable("muestraTxAll")
-     val avgAll = sqlContext.sql("SELECT * FROM  muestraTxAll").coalesce(numPartitions)
-     val freqEmail=sqlContext.sql("SELECT idsesion, probabilidad_ubicacion_email FROM  muestrafreqemail").coalesce(numPartitions)
-     joinDF=avgAll.join(freqEmail,avgAll("idcard")===freqEmail("idsesion")).drop(col("idsesion"))
-     joinDF.write.mode(SaveMode.Overwrite).saveAsTable("muestraTxAll1")
-     logger.info("..........Fin Join freqemail...............")
-     val avgAndFreq = sqlContext.sql("SELECT * FROM  muestraTxAll1").coalesce(numPartitions)
-     val freqCard=sqlContext.sql("SELECT idsesion, probabilidad_ubicacion_numero_tarjeta FROM  muestrafreqtar").coalesce(numPartitions)
-     joinDF=avgAndFreq.join(freqCard,avgAndFreq("idcard")===freqCard("idsesion")).drop(col("idsesion"))
-     joinDF.write.mode(SaveMode.Overwrite).saveAsTable("muestraTxAll2")
-     logger.info("..........Fin Join freqCard...............")
-     val table = (sqlContext.sql("SELECT idsesion, tipo_tarjeta, monto, moneda, valida_cifin, fraude FROM  fraudsidentified")
-     .coalesce(numPartitions))
-     val tableAll = sqlContext.sql("SELECT * FROM  muestraTxAll2").coalesce(numPartitions)
-     joinDF=tableAll.join(table,tableAll("idcard")===table("idsesion")).drop(col("idcard"))     
-     joinDF.write.mode(SaveMode.Overwrite).saveAsTable("muestraTxAllF")
-     logger.info("..........Fin del join final...............")
-	  */
-
-// Load and parse the data file, converting it to a DataFrame.
-     val original = sqlContext.sql("SELECT * FROM muestratxallf").coalesce(numPartitions)
-     val data=(original
-     .drop(col("idsesion"))
-     .drop(col("moneda"))
-     .drop(col("tipo_tarjeta")))
+     logger.info("........Reading datosFinalesRed...............")
+     var data = sqlContext.sql("SELECT * FROM datosFinalesRed where fraude==1 OR fraude==-1").coalesce(numPartitions)
+     val names = data.columns
+     val ignore = Array("idsesion", "fraude")
+     val assembler = (new VectorAssembler()
+     .setInputCols( for (i <- names if !(ignore contains i )) yield i)
+     .setOutputCol("features"))
+     logger.info("........Converting to features...............")
+     data = assembler.transform(data)
+          
      
      logger.info("..........Conviertinedo DF a labeling...............")
      val rows: RDD[Row] = data.rdd
-     val labeledPoints: RDD[LabeledPoint]=rows.map(row =>{LabeledPoint(row.getInt(16).toDouble,
-     Vectors.dense(row.getDouble(0), row.getDouble(1),row.getDouble(2), row.getDouble(3),
-     row.getDouble(4), row.getDouble(5),row.getDouble(6), row.getDouble(7),
-     row.getDouble(8), row.getDouble(9),row.getDouble(10), row.getDouble(11),
-     row.getDouble(12), row.getDouble(13),row.getDouble(14), row.getByte(15).toDouble))
-     })
+     val labeledPoints: RDD[LabeledPoint]=rows.map(row =>{LabeledPoint(row.getInt(25).toDouble,
+     row.getAs[SparseVector](39))})
     import sqlContext.implicits._
     val labeledDF=labeledPoints.toDF()
-    logger.info("..........Comienza PCA...............")
-    val PCs=getPCA(labeledDF,3)
-    PCs.write.mode(SaveMode.Overwrite).saveAsTable("PCs")
-     logger.info("..........Fin PCA...............")
-     
+    //labeledDF.write.mode(SaveMode.Overwrite).saveAsTable("labeledDatos")
+        
      
      val labelIndexer = new StringIndexer()
-  .setInputCol("label")
-  .setOutputCol("indexedLabel")
-  .fit(labeledDF)
-     
-   
-    
+     .setInputCol("label")
+     .setOutputCol("indexedLabel")
+     .fit(labeledDF)
+         
      val featureIndexer = new VectorIndexer()
     .setInputCol("features")
     .setOutputCol("indexedFeatures")
     .setMaxCategories(4)
     .fit(labeledDF)
-  
-  
-// Split the data into training and test sets (30% held out for testing)
-val Array(trainingData, testData) = labeledDF.randomSplit(Array(0.7, 0.3))
+    
+    var textOut="tipo,trees,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1 \n"
+	var textOut2=""
+    var textOut3="tress \n"
+    
+    for (x <- trees) {
+    
+ 
+   val nTrees=x  
+   
+   logger.info("..........inicinando ciclo con un valor de trees..............."+ nTrees)
+   // Split the data into training and test sets (30% held out for testing)
+   val Array(trainingData, testData) = labeledDF.randomSplit(Array(0.7, 0.3))
 
-// Train a RandomForest model.
-val rf = new RandomForestClassifier()
+   // Train a RandomForest model.
+   val rf = new RandomForestClassifier()
   .setLabelCol("indexedLabel")
   .setFeaturesCol("indexedFeatures")
-  .setNumTrees(100)
+  .setNumTrees(nTrees)
+  .setMaxDepth(maxDepth)
 
-// Convert indexed labels back to original labels.
-val labelConverter = new IndexToString()
+   // Convert indexed labels back to original labels.
+   val labelConverter = new IndexToString()
   .setInputCol("prediction")
   .setOutputCol("predictedLabel")
   .setLabels(labelIndexer.labels)
@@ -169,44 +154,112 @@ val labelConverter = new IndexToString()
 // Chain indexers and forest in a Pipeline
 val pipeline = new Pipeline()
   .setStages(Array(labelIndexer, featureIndexer, rf, labelConverter))
+// creating the cross validation without paramter grid
+val paramGrid = new ParamGridBuilder().build()
+val cv = new CrossValidator()
+  .setEstimator(pipeline)
+  .setEvaluator(new BinaryClassificationEvaluator)
+  .setEstimatorParamMaps(paramGrid)
+  .setNumFolds(5) // Use 3+ in practice 
+
 logger.info("..........Training...............")
 // Train model.  This also runs the indexers.
-val model = pipeline.fit(trainingData)
+val model = cv.fit(trainingData)
+// writing the importances
+val rfModel = model.bestModel.asInstanceOf[PipelineModel].stages(2).asInstanceOf[RandomForestClassificationModel]
+val importances=rfModel.featureImportances
+textOut2=(textOut + nTrees + " " + importances + "\n" )
+println(textOut2)
+
+//saving the best model
+textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + rfModel.toDebugString + "\n\n"
+
 
 logger.info("..........Testing...............")
 // Make predictions.
-val predictions = model.transform(testData)
+var predictions = model.transform(testData)
+
+logger.info("..........Calculate Error on test...............")
+
+var predRow: RDD[Row]=predictions.select("label", "predictedLabel").rdd
+var predRDD: RDD[(Double, Double)] = (predRow.map(row=>
+{(row.getDouble(0), row.getString(1).toDouble)}))
+var tp=predRDD.filter(r=>r._1== 1.0 && r._2==1.0).count().toDouble
+var fn=predRDD.filter(r=>r._1== 1.0 && r._2== -1.0).count().toDouble
+var tn=predRDD.filter(r=>r._1== -1.0 && r._2== -1.0).count().toDouble
+var fp=predRDD.filter(r=>r._1== -1.0 && r._2== 1.0).count().toDouble
+var TPR = (tp/(tp+fn))*100.0
+var SPC = (tn/(fp+tn))*100.0
+var PPV= (tp/(tp+fp))*100.0
+var acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
+var f1= ((2*tp)/(2*tp+fp+fn))*100.0
+textOut=(textOut + "test," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
+PPV + "," + acc + "," + f1  + "\n" )
+println(textOut)
 
 
 
-logger.info("..........Calculate Error...............")
-val evaluator = (new BinaryClassificationEvaluator()
-  .setLabelCol("indexedLabel"))
+logger.info("..........Calculate Error on Training...............")
+// Make predictions.
+predictions = model.transform(trainingData)
+predRow = predictions.select("label", "predictedLabel").rdd
+predRDD = (predRow.map(row=>
+{(row.getDouble(0), row.getString(1).toDouble)}))
+tp=predRDD.filter(r=>r._1== 1.0 && r._2==1.0).count().toDouble
+fn=predRDD.filter(r=>r._1== 1.0 && r._2== -1.0).count().toDouble
+tn=predRDD.filter(r=>r._1== -1.0 && r._2== -1.0).count().toDouble
+fp=predRDD.filter(r=>r._1== -1.0 && r._2== 1.0).count().toDouble
+TPR = (tp/(tp+fn))*100.0
+SPC = (tn/(fp+tn))*100.0
+PPV= (tp/(tp+fp))*100.0
+acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
+f1= ((2*tp)/(2*tp+fp+fn))*100.0
+textOut=(textOut + "train," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
+PPV + "," + acc + "," + f1  + "\n" )
+println(textOut)
 
-val area = evaluator.evaluate(predictions)
-val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
+}
 
+// witing the files
+val pw = new PrintWriter(new File("Out.txt" ))
+pw.write(textOut)
+pw.close
 
-println(area)
-println(rfModel.featureImportances)
+val pw2 = new PrintWriter(new File("Out2.txt" ))
+pw2.write(textOut2)
+pw2.close
+
+val pw3 = new PrintWriter(new File("Out3.txt" ))
+pw3.write(textOut3)
+pw3.close
+
 
 
 // "f1", "precision", "recall", "weightedPrecision", "weightedRecall"
 
-//predictions.select("predictedLabel", "label", "features").show(10)
-
-val onlyF= labeledDF.filter("label= 1")
-val N=onlyF.count()
-val nF = model.transform(onlyF).filter("predictedLabel=1").count()
-val rd=nF/N.toDouble
-println(N)
-println(rd)
 
 
 
 
-/*
 
+
+/*Aqui!!!!!!!!!!!!!!!!!!!!!!
+
+
+spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar n 150 7 6 10 30 50 80 100 150
+spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar [y=calculo, n=toma tabla]
+ [numpartitions] [numero de valores de arboles] [arrya con numero de arboles]
+
+
+logger.info("..........Comienza PCA...............")
+    val PCs=getPCA(labeledDF,3)
+    PCs.write.mode(SaveMode.Overwrite).saveAsTable("PCs")
+     logger.info("..........Fin PCA...............")
+     
+     
+     
+val evaluator = (new BinaryClassificationEvaluator()
+  .setLabelCol("indexedLabel"))
 */ 
      sc.stop()
   }
