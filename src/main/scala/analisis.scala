@@ -28,6 +28,8 @@ import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.mllib.linalg.SparseVector
 import org.apache.spark.ml.PipelineModel
+import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.mllib.linalg.Vectors
 
 
 object analisis {
@@ -69,6 +71,72 @@ def saveRedTable(dataFrameIn: DataFrame, nam: String) : Unit  = {
 }
 
 
+def trainWithKmeans(dataFrameIn: DataFrame, parametros: (String, Int, Int),sc: SparkContext, sq: org.apache.spark.sql.SQLContext, trees: Int) : PipelineModel  = {
+   // Split the data into training and test sets (30% held out for testing)
+   val logger = LogManager.getLogger("analisis")
+   val g=dataFrameIn.where("label=1.0").count().toInt
+   val setTosample=dataFrameIn.where("label=-1.0").cache()
+   val setFraud=dataFrameIn.where("label=1.0")
+   logger.info("..........Subsampling with Kmeans...............")
+   // Trains a k-means model
+   val kmeans = (new KMeans()
+   .setK(g)
+   .setFeaturesCol("features")
+   .setPredictionCol("prediction")
+   .setInitMode("random"))      
+   val modelK = kmeans.fit(setTosample)
+
+   logger.info("..........Converting centers to new train data set...............")
+
+   val centers=modelK.clusterCenters
+   val newValuesRDD: RDD[LabeledPoint]=(sc.parallelize(centers)
+   .map(row =>{LabeledPoint(-1.0, row)}))
+   import sq.implicits._
+   val newValuesDF=newValuesRDD.toDF()
+   val setTrain=newValuesDF.unionAll(setFraud)   
+   
+   val labelIndexer = (new StringIndexer()
+   .setInputCol("label")
+   .setOutputCol("indexedLabel")
+   .fit(setTrain))
+   
+   
+    
+   val featureIndexer = (new VectorIndexer()
+   .setInputCol("features")
+   .setOutputCol("indexedFeatures")
+   .setMaxCategories(2)
+   .fit(setTrain))
+
+   val rf = (new RandomForestClassifier()
+  .setLabelCol("indexedLabel")
+  .setFeaturesCol("indexedFeatures")
+  .setNumTrees(trees)
+  .setImpurity(parametros._1)
+  .setMaxDepth(parametros._2)
+  .setMaxBins(parametros._3)
+  )
+  
+  // Convert indexed labels back to original labels.
+  val labelConverter = (new IndexToString()
+  .setInputCol("prediction")
+  .setOutputCol("predictedLabel")
+  .setLabels(labelIndexer.labels))
+
+  
+ // Chain indexers and forest in a Pipeline
+  val pipeline = (new Pipeline()
+  .setStages(Array(labelIndexer, featureIndexer, rf, labelConverter)))
+
+  logger.info("..........Training...............")
+   val model = pipeline.fit(setTrain)
+   
+   return (model)
+     
+     
+     }
+
+
 
 
   def main(args: Array[String]) {
@@ -84,6 +152,15 @@ def saveRedTable(dataFrameIn: DataFrame, nam: String) : Unit  = {
   
   opt[String]('o', "out").action( (x, c) =>
     c.copy(out = x) ).text("nameof the outfiles")  
+    
+  opt[String]('m', "mex").action( (x, c) =>
+    c.copy(mex = x) ).text("memory executor (7g or 7000m)")  
+  
+  opt[String]('h', "hmem").action( (x, c) =>
+    c.copy(hmem = x) ).text("memory executor overhead (7g or 7000m)")    
+    
+  opt[String]('e', "estrategia").action( (x, c) =>
+    c.copy(estrategia = x) ).text("strategy to solve the imbalance(kmeans,meta,smote)")    
     
   opt[Int]('k', "kfolds").action( (x, c) =>
     c.copy(kfolds = x) ).text("kfolds is an integer of num of folds")
@@ -114,10 +191,6 @@ parser.parse(args, Config()) match {
      logger.setLevel(Level.DEBUG)
      Logger.getLogger("org").setLevel(Level.WARN)
      Logger.getLogger("hive").setLevel(Level.WARN)
-     logger.info("Solicitando recursos a Spark")
-     val conf = new SparkConf().setAppName("AnalisisP2P").set("spark.executor.memory","7373m")
-     val sc = new SparkContext(conf)
-     val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
      logger.info("........getting the parameters...............")
      // 
     val numPartitions=config.par
@@ -128,11 +201,28 @@ parser.parse(args, Config()) match {
  	val opt=config.read
  	val salida=config.out
  	val imp=config.imp.toArray
+ 	val memex=config.mex
+ 	val memover=config.hmem
+ 	val est=config.estrategia
      
-  logger.info("..........buliding grid of parameters...............")
+   logger.info("..........buliding grid of parameters...............")
    //val imp= Array("entropy", "gini")
-   val grid = for (x <- imp; y <- arrayNDepth; z <- arrayBins) yield(x,y,z)
+   val grid = for {
+           x <- imp
+           y <- arrayNDepth
+           z <- arrayBins
+   } yield(x,y,z)
+   
    for (a <- grid) println(a)
+    
+     logger.info("Solicitando recursos a Spark")
+     val conf = new SparkConf().setAppName("AnalisisP2P")
+     .set("spark.executor.memory",memex)
+     .set("spark.yarn.executor.memoryOverhead", memover)
+     val sc = new SparkContext(conf)
+     val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
+     import sqlContext.implicits._
+    
      
      if (opt=="read1")
      {
@@ -155,40 +245,21 @@ parser.parse(args, Config()) match {
      logger.info("........Converting to features...............")
      data = assembler.transform(data)
      data.write.mode(SaveMode.Overwrite).saveAsTable("labeledDatos")
-      
+     logger.info("..........Conviertinedo DF a labeling...............")
+     val rows: RDD[Row] = data.rdd
+     val labeledPoints: RDD[LabeledPoint]=(rows.map(row =>{LabeledPoint(row.getInt(25).toDouble,
+     row.getAs[SparseVector](39))}))
+     import sqlContext.implicits._
+     val labeledDF=labeledPoints.toDF().coalesce(numPartitions)
+        
       }
     
    
-    logger.info("........Reading labeledDatos...............")
-     val datos = sqlContext.sql("SELECT * FROM labeledDatos where fraude==1 OR fraude==-1").coalesce(numPartitions)
     
+    logger.info("........Reading labeldf...............")
+    val labeledDF = sqlContext.sql("SELECT * FROM labeldf").coalesce(numPartitions)
     
-     //
-    // 
- 
-     
-     logger.info("..........Conviertinedo DF a labeling...............")
-     val rows: RDD[Row] = datos.rdd
-     val labeledPoints: RDD[LabeledPoint]=rows.map(row =>{LabeledPoint(row.getInt(25).toDouble,
-     row.getAs[SparseVector](39))})
-     import sqlContext.implicits._
-     val labeledDF=labeledPoints.toDF().coalesce(numPartitions)
-    //labeledDF.write.mode(SaveMode.Overwrite).saveAsTable("labeledDatos")
-        
-     logger.info("..........Conviertinedo Features...............")
-     
-     val labelIndexer = (new StringIndexer()
-     .setInputCol("label")
-     .setOutputCol("indexedLabel")
-     .fit(labeledDF))
-         
-     val featureIndexer = (new VectorIndexer()
-    .setInputCol("features")
-    .setOutputCol("indexedFeatures")
-    .setMaxCategories(2)
-    .fit(labeledDF))
-    
-    var textOut="tipo,trees,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1 \n"
+    var textOut="tipo,trees,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1,MGEO,PEXC,MCC \n"
 	var textOut2=""
     var textOut3="trees \n"
     
@@ -205,64 +276,20 @@ parser.parse(args, Config()) match {
    for( a <- 1 to k){
    logger.info("..........inicinando ciclo con un valor de trees..............."+ nTrees)
    println("using(impurity,depth, bins) " + params)
-   // Split the data into training and test sets (30% held out for testing)
-   val Array(trainingData, testData) = labeledDF.randomSplit(Array(0.7, 0.3))
-
-   // Train a RandomForest model.
-  val rf = (new RandomForestClassifier()
-  .setLabelCol("indexedLabel")
-  .setFeaturesCol("indexedFeatures")
-  .setNumTrees(nTrees)
-  .setImpurity(params._1)
-  .setMaxDepth(params._2)
-  .setMaxBins(params._3)
-  )
-  
-
-   // Convert indexed labels back to original labels.
-  val labelConverter = (new IndexToString()
-  .setInputCol("prediction")
-  .setOutputCol("predictedLabel")
-  .setLabels(labelIndexer.labels))
-
-// Chain indexers and forest in a Pipeline
-val pipeline = (new Pipeline()
-  .setStages(Array(labelIndexer, featureIndexer, rf, labelConverter)))
-
-// creating the cross validation without paramter grid
-// val paramGrid = new ParamGridBuilder().build()
-/*
-val paramGrid = (new ParamGridBuilder()
-  .addGrid(rf.maxDepth, arrayNDepth)
-  .addGrid(rf.impurity, Array("entropy", "gini"))
-  .addGrid(rf.maxBins, arrayBins)
-  .build())
-
-  
-val cv = (new CrossValidator()
-  .setEstimator(pipeline)
-  .setEvaluator(new BinaryClassificationEvaluator)
-  .setEstimatorParamMaps(paramGrid)
-  .setNumFolds(5))
-  */
-logger.info("..........Training...............")
-// Train model.  This also runs the indexers.
-//val model = cv.fit(trainingData)
-val model = pipeline.fit(trainingData)
-// writing the importances
-//val rfModel = model.bestModel.asInstanceOf[PipelineModel].stages(2).asInstanceOf[RandomForestClassificationModel]
-val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
-val importances=rfModel.featureImportances
-textOut2=(textOut2 + nTrees + " " + importances + "\n" )
-
-
-
-// best parameters
-//val par = cv.getEstimatorParamMaps.zip(model.avgMetrics)
-
-//saving the best model
-//textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + par.toString + "\n" + rfModel.toDebugString + "\n\n"
-textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
+   val Array(trainingData, testData) = labeledDF.cache().randomSplit(Array(0.7, 0.3))
+   
+   var model = {
+   if (est=="kmeans")
+   trainWithKmeans(trainingData,params,sc,sqlContext,nTrees)
+   else 
+   trainWithKmeans(trainingData,params,sc,sqlContext,nTrees)
+   }
+   
+   
+   val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
+   val importances=rfModel.featureImportances
+   textOut2=(textOut2 + nTrees + "," + importances.toArray + "\n" )
+   textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
 
 
 
@@ -284,8 +311,11 @@ var SPC = (tn/(fp+tn))*100.0
 var PPV= (tp/(tp+fp))*100.0
 var acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
 var f1= ((2*tp)/(2*tp+fp+fn))*100.0
+var mGeo=math.sqrt(TPR*SPC)
+var pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
+var MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
 textOut=(textOut + "test," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
-PPV + "," + acc + "," + f1  +  "," + params + "\n" )
+PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
 predictions.unpersist()
 println(textOut)
 
@@ -307,16 +337,13 @@ SPC = (tn/(fp+tn))*100.0
 PPV= (tp/(tp+fp))*100.0
 acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
 f1= ((2*tp)/(2*tp+fp+fn))*100.0
+mGeo=math.sqrt(TPR*SPC)
+pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
+MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
 textOut=(textOut + "train," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
-PPV + "," + acc + "," + f1 +  "," + params + "\n" )
+PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
 predictions.unpersist()
 println(textOut)
-
-}
-
-}
-
-}
 
 logger.info("..........writing the files...............")
 
@@ -333,49 +360,14 @@ pw3.write(textOut3)
 pw3.close
 
 
+}
 
-  
+}
 
-// "f1", "precision", "recall", "weightedPrecision", "weightedRecall"
-
-
-
+}
 
 
 
-
-/*Aqui!!!!!!!!!!!!!!!!!!!!!!
-
-
-spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar read 200 7 5 6 10 30 50 80 100 150
-spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar [y=calculo, n=toma tabla]
- [numpartitions] [numero de valores de arboles] [arrya con numero de arboles]
-                                                              0 1   2  3 4  5  6  7  8  9 10 11  12 13 14 15
- spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar read3 200 5 3 10 15 30 5 10 25 50 80 100 3  32 64 80 
- spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar read3 250 5 1 30 5 10 25 50 80 100 1 64
- 
- val numPartitions=args(1).toInt
- val k=args(2).toInt
- val numMaxDepth=args(3).toInt
- val arrayNDepth=args.slice(4,4+numMaxDepth).map(_.toInt)
- val numOfTrees= args(4+numMaxDepth).toInt
- val trees=args.slice(4+numMaxDepth+1,4+numMaxDepth+numOfTrees+1).map(_.toInt)
- val numOfBins= args(4+numMaxDepth+numOfTrees+1).toInt
- val arrayBins=args.slice(4+numMaxDepth+numOfTrees+2,4+numMaxDepth+numOfTrees+numOfBins+1).map(_.toInt)
-															  0	    1   2 3 4  5 6  7  8  9  10  11 12
- spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar read3 250 5 1 30 5 10 25 50 80 100 2  64 80
-
-
-logger.info("..........Comienza PCA...............")
-    val PCs=getPCA(labeledDF,3)
-    PCs.write.mode(SaveMode.Overwrite).saveAsTable("PCs")
-     logger.info("..........Fin PCA...............")
-     
-     
-     
-val evaluator = (new BinaryClassificationEvaluator()
-  .setLabelCol("indexedLabel"))
-*/ 
      sc.stop()
      
      case None =>
@@ -385,6 +377,59 @@ val evaluator = (new BinaryClassificationEvaluator()
 
   }
 }
+
+
+
+
+/*Aqui!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -p 500 -h 1000 -m 13500m -r none -o testkm -e kmeans -k 5 -t 10,50,100,150,200 -i gini,entropy -d 15,30 -b 32,72
+
+
+  opt[Int]('p', "par").action( (x, c) =>
+    c.copy(par = x) ).text("par is an integer of num of partions")
+    
+  opt[String]('r', "read").action( (x, c) =>
+    c.copy(read = x) ).text("read is parameter that says wich is the base table")
+  
+  opt[String]('o', "out").action( (x, c) =>
+    c.copy(out = x) ).text("nameof the outfiles")  
+    
+  opt[Int]('k', "kfolds").action( (x, c) =>
+    c.copy(kfolds = x) ).text("kfolds is an integer of num of folds")
+
+  opt[Seq[Int]]('t', "trees").valueName("<trees1>,<trees1>...").action( (x,c) =>
+    c.copy(trees = x) ).text("trees to evaluate")
+    
+  opt[Seq[String]]('i', "imp").valueName("<impurity>,<impurity>...").action( (x,c) =>
+    c.copy(imp = x) ).text("impurity to evaluate")
+    
+  opt[Seq[Int]]('d', "depth").valueName("<depth1>,<depth2>...").action( (x,c) =>
+    c.copy(depth = x) ).text("depth to evaluate")
+    
+  opt[Seq[Int]]('b', "bins").valueName("<bins1>,<bins2>...").action( (x,c) =>
+    c.copy(bins = x) ).text("bins to evaluate")
+
+  help("help").text("prints this usage text")
+  
+  libraryDependencies += "com.github.fommil.netlib" % "all" % "1.1.2"
+--repositories "com.github.fommil.netlib" % "all" % "1.1.2"
+
+spark-shell --driver-memory 4g --executor-memory 8g
+
+
+
+
+
+
+
+
+
+
+
+*/ 
 
 
  
