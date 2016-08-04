@@ -6,46 +6,24 @@ import org.apache.log4j.{Level, LogManager, Logger}
 import org.apache.spark.SparkContext
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.rdd.RDD
-import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{StructField, StructType}
-import org.apache.spark.sql.{types, _}
+import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.SQLContext
-import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.{Pipeline,PipelineModel}
 import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
-import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
-import org.apache.spark.ml.tuning.{ParamGridBuilder, CrossValidator}
-import org.apache.spark.ml.feature.PCA
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
-import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.mllib.linalg.SparseVector
-import org.apache.spark.ml.PipelineModel
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.mllib.linalg.Vectors
+import scala.collection.mutable.ArrayBuffer
 
 
 object analisis {
-
- def getPCA(dataFrame: DataFrame, nc: Int): DataFrame = {
-    val pca = new PCA()
-    .setInputCol("features")
-    .setOutputCol("pcaFeatures")
-    .setK(nc)
-    .fit(dataFrame)
-    val pcaDF = pca.transform(dataFrame)
-    return pcaDF
-        
-  }
-
-
 
 
 def saveRedTable(dataFrameIn: DataFrame, nam: String) : Unit  = {
@@ -71,6 +49,55 @@ def saveRedTable(dataFrameIn: DataFrame, nam: String) : Unit  = {
 }
 
 
+
+def trainMeta(dataFrameIn: DataFrame, parametros: (String, Int, Int),sc: SparkContext, sq: org.apache.spark.sql.SQLContext, trees: Int) : Array(PipelineModel)  = {
+   // Split the data into training and test sets (30% held out for testing)
+   val logger = LogManager.getLogger("analisis")
+   val f=dataFrameIn.where("label=1.0").count().toInt
+   val l=dataFrameIn.where("label=-1.0").count().toInt
+   val numC=l/f
+   val rate = 1.0/(numC)
+   val setTosample=dataFrameIn.where("label=-1.0")
+   val setFraud=dataFrameIn.where("label=1.0")
+   var classificadores = ArrayBuffer[PipelineModel]()
+   for( a <- 1 to numC){
+   logger.info("..........Subsampling with rate of: " + rate  + "...............")
+   val setSampled=setTosample.sample(rate) 
+   val setTrain=setSampled.unionAll(setFraud)
+   val labelIndexer = (new StringIndexer()
+   .setInputCol("label")
+   .setOutputCol("indexedLabel")
+   .fit(setTrain))
+   val featureIndexer = (new VectorIndexer()
+   .setInputCol("features")
+   .setOutputCol("indexedFeatures")
+   .setMaxCategories(2)
+   .fit(setTrain))
+   val rf = (new RandomForestClassifier()
+   .setLabelCol("indexedLabel")
+   .setFeaturesCol("indexedFeatures")
+   .setNumTrees(trees)
+   .setImpurity(parametros._1)
+   .setMaxDepth(parametros._2)
+   .setMaxBins(parametros._3)
+   )  
+   // Convert indexed labels back to original labels.
+   val labelConverter = (new IndexToString()
+   .setInputCol("prediction")
+   .setOutputCol("predictedLabel")
+   .setLabels(labelIndexer.labels))
+   // Chain indexers and forest in a Pipeline
+   val pipeline = (new Pipeline()
+   .setStages(Array(labelIndexer, featureIndexer, rf, labelConverter)))
+   logger.info("..........Training...............")
+   var model=pipeline.fit(setTrain)
+   classificadores += model
+   
+  
+   }
+   return (classificadores)
+}
+  
 def trainWithKmeans(dataFrameIn: DataFrame, parametros: (String, Int, Int),sc: SparkContext, sq: org.apache.spark.sql.SQLContext, trees: Int) : PipelineModel  = {
    // Split the data into training and test sets (30% held out for testing)
    val logger = LogManager.getLogger("analisis")
@@ -102,11 +129,6 @@ def trainWithKmeans(dataFrameIn: DataFrame, parametros: (String, Int, Int),sc: S
    
    
     
-   val featureIndexer = (new VectorIndexer()
-   .setInputCol("features")
-   .setOutputCol("indexedFeatures")
-   .setMaxCategories(2)
-   .fit(setTrain))
 
    val rf = (new RandomForestClassifier()
   .setLabelCol("indexedLabel")
@@ -287,10 +309,10 @@ parser.parse(args, Config()) match {
    
    
    val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
-   val importances=rfModel.featureImportances
-   textOut2=(textOut2 + nTrees + "," + importances.toArray + "\n" )
+   val importances=rfModel.featureImportances.toArray
+   textOut2=(textOut2 + nTrees + "," + importances.mkString(", ") + "\n" )
    textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
-
+   
 
 
 logger.info("..........Testing...............")
@@ -385,7 +407,7 @@ pw3.close
 
 
 
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -p 500 -h 1000 -m 13500m -r none -o testkm -e kmeans -k 5 -t 10,50,100,150,200 -i gini,entropy -d 15,30 -b 32,72
+spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -p 500 -h 1000 -m 13500m -r none -o testkm1_ -e kmeans -k 1 -t 50 -i gini,entropy -d 30 -b 72
 
 
   opt[Int]('p', "par").action( (x, c) =>
