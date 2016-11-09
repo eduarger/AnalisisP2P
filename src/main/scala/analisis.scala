@@ -46,7 +46,7 @@ object analisis {
     val x=(-20d to 20d by 0.25d).toArray
     val bw= Array(2.0)
     val densidad= denCal(coefLR,bw,x)
-    out=densidad.mkString(", ") + "\n"
+    out=out+densidad.mkString(", ") + "\n"
     out
       }
 
@@ -272,9 +272,8 @@ def main(args: Array[String]) {
   val d2= getDenText(predDen,"Fraude,"+nTrees+ ","+params)
   txtDendsidad=d1+d2
   val pwdensidad = new PrintWriter(new File(salida+"_denisad.txt" ))
-
-  pw.write(txtDendsidad)
-  pw.close
+  pwdensidad.write(txtDendsidad)
+  pwdensidad.close
 
 }
 
