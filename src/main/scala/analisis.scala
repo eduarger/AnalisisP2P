@@ -22,9 +22,14 @@ import scala.collection.mutable.ArrayBuffer
 
 object analisis {
 
-  def proRatio(row:org.apache.spark.sql.Row):Double ={
+  def proRatio(row:org.apache.spark.sql.Row, inv:Boolean):Double ={
     val values=row.getAs[DenseVector](0)
-    val log = math.log(values(0)/values(1))
+    val log = {
+      if(inv)
+        math.log(values(1)/values(0))
+      else
+        math.log(values(0)/values(1))
+    }
     log
   }
 
@@ -40,10 +45,10 @@ object analisis {
     densities
   }
 // tiene que entrear un dataframe con la probilidad, similar al rwa predcition
-  def getDenText(dataIn:DataFrame,inText:String):String={
-    var out=inText+"\n"
-    var coefLR: RDD[Double] = dataIn.rdd.map(row=>{proRatio(row)})
-    val x=(-20d to 20d by 0.25d).toArray
+  def getDenText(dataIn:DataFrame,inText:String,ejeX:Array[Double],inv:Boolean):String={
+    var out=inText+","
+    var coefLR: RDD[Double] = dataIn.rdd.map(row=>{proRatio(row,inv)})
+    val x=ejeX
     val bw= Array(2.0)
     val densidad= denCal(coefLR,bw,x)
     out=out+densidad.mkString(", ") + "\n"
@@ -259,22 +264,23 @@ def main(args: Array[String]) {
   val pw3 = new PrintWriter(new File(salida+"Model.txt" ))
   pw3.write(textOut3)
   pw3.close
+  val axis=(-5d to 5d by 0.1d).toArray
   logger.info("..........getting densidity...............")
   val legal=trainingData.where("label=-1.0")
   val predLegal = model.transform(legal)
-  var predDen = predLegal.select("rawPrediction")
+  var predDen = predLegal.select("probability")
   logger.info("..........getting densidity legal...............")
-  val d1= getDenText(predDen,"Legal,"+nTrees+ ","+params)
+  val d1= getDenText(predDen,"Legal,"+nTrees+ ","+params,axis,false)
   val fraude=trainingData.where("label=1.0")
   val predFraud= model.transform(fraude)
-  predDen = predFraud.select("rawPrediction")
+  predDen = predFraud.select("probability")
   logger.info("..........getting densidity fraude...............")
-  val d2= getDenText(predDen,"Fraude,"+nTrees+ ","+params)
-  txtDendsidad=d1+d2
-  val pwdensidad = new PrintWriter(new File(salida+"_denisad.txt" ))
+  val d2= getDenText(predDen,"Fraude,"+nTrees+ ","+params,axis,true)
+  txtDendsidad="clase,trees,imp,depth,bines,"+axis.mkString(", ") + "\n"+d1+d2
+  val pwdensidad = new PrintWriter(new File(salida+"_denisad.csv" ))
   pwdensidad.write(txtDendsidad)
   pwdensidad.close
-
+  logger.info("..........termino..............")
 }
 
 }
