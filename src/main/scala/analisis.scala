@@ -54,25 +54,24 @@ object analisis {
     out=out+densidad.mkString(", ") + "\n"
     out
       }
-
+// parametros(trees,impurity,depth, bins)
 def trainingRF(dataFrameIn: DataFrame,
-    parametros: (String, Int, Int),
+    parametros: (Int,String, Int, Int),
     sc: SparkContext,
     sq: org.apache.spark.sql.SQLContext,
-    trees: Int,
     laIndx : StringIndexerModel,
     feIndx: VectorIndexerModel,
     laConv : IndexToString ) : PipelineModel  = {
 
-  val logger = LogManager.getLogger("analisis")
+  @transient val logger = LogManager.getLogger("analisis")
   logger.info("..........training RF...............")
   val rf = (new RandomForestClassifier()
   .setLabelCol("indexedLabel")
   .setFeaturesCol("indexedFeatures")
-  .setNumTrees(trees)
-  .setImpurity(parametros._1)
-  .setMaxDepth(parametros._2)
-  .setMaxBins(parametros._3)
+  .setNumTrees(parametros._1)
+  .setImpurity(parametros._2)
+  .setMaxDepth(parametros._3)
+  .setMaxBins(parametros._4)
   )
    // Chain indexers and forest in a Pipeline
   val pipeline = (new Pipeline()
@@ -119,13 +118,13 @@ def main(args: Array[String]) {
 // parser.parse returns Option[C]
   parser.parse(args, Config()) match {
   case Some(config) =>
-     val logger = LogManager.getLogger("analisis")
+     @transient private val logger = LogManager.getLogger("analisis")
      logger.setLevel(Level.INFO)
      logger.setLevel(Level.DEBUG)
      Logger.getLogger("org").setLevel(Level.WARN)
      Logger.getLogger("hive").setLevel(Level.WARN)
      logger.info("........getting the parameters...............")
-     //
+     //lectura de parametros
      val tablaBase=config.in
      val numPartitions=config.par
  	   val k=config.kfolds
@@ -139,12 +138,12 @@ def main(args: Array[String]) {
  	   val memover=config.hmem
  	   val est=config.estrategia
      logger.info("..........buliding grid of parameters...............")
-     //val imp= Array("entropy", "gini")
      val grid = for {
+           s <- trees
            x <- imp
            y <- arrayNDepth
            z <- arrayBins
-     } yield(x,y,z)
+     } yield(s,x,y,z)
      // printing the grid
      logger.info("..........Here the grid constructed...............")
      for (a <- grid) println(a)
@@ -183,31 +182,27 @@ def main(args: Array[String]) {
 
 
     for (params <- grid )
-
     {
-     for (x <- trees) {
-
-
-   val nTrees=x
-
+// for (x <- trees) {
+  // val nTrees=x
    for( a <- 1 to k){
-   logger.info("..........inicinando ciclo con un valor de trees..............."+ nTrees)
-   println("using(impurity,depth, bins) " + params)
+   logger.info("..........inicinando ciclo con un valor de trees..............."+ params._1)
+   println("using(trees,impurity,depth, bins) " + params)
    val Array(trainingData, testData) = labeledDF.randomSplit(Array(0.7, 0.3))
 
 
    var model = {
    if (est=="rfpure")
-     trainingRF(trainingData,params,sc,sqlContext,nTrees,labelIndexer,featureIndexer,labelConverter)
+     trainingRF(trainingData,params,sc,sqlContext,labelIndexer,featureIndexer,labelConverter)
    if(est=="metaclasificador")
-     trainingRF(trainingData,params,sc,sqlContext,nTrees,labelIndexer,featureIndexer,labelConverter)
+     trainingRF(trainingData,params,sc,sqlContext,labelIndexer,featureIndexer,labelConverter)
    else
-     trainingRF(trainingData,params,sc,sqlContext,nTrees,labelIndexer,featureIndexer,labelConverter)
+     trainingRF(trainingData,params,sc,sqlContext,labelIndexer,featureIndexer,labelConverter)
    }
    val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
    val importances=rfModel.featureImportances.toArray
-   textOut2=(textOut2 + nTrees + "," + importances.mkString(", ") + "\n" )
-   textOut3=textOut3 + "---Learned classification forest model" + nTrees+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
+   textOut2=(textOut2 + params._1 + "," + importances.mkString(", ") + "\n" )
+   textOut3=textOut3 + "---Learned classification forest model" + params._1+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
    logger.info("..........Testing...............")
    // Make predictions.
    var predictions = model.transform(testData)
@@ -227,7 +222,7 @@ def main(args: Array[String]) {
    var mGeo=math.sqrt(TPR*SPC)
    var pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
    var MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
-   textOut=(textOut + "test," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
+   textOut=(textOut + "test," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
       PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
    predictions.unpersist()
    println(textOut)
@@ -236,6 +231,7 @@ def main(args: Array[String]) {
   // Make predictions.
   predictions = model.transform(trainingData)
   predictions.cache()
+  //TODO: define a Class
   predRow = predictions.select("label", "predictedLabel").rdd
   predRDD = (predRow.map(row=>{(row.getDouble(0), row.getString(1).toDouble)}))
   tp=predRDD.filter(r=>r._1== 1.0 && r._2==1.0).count().toDouble
@@ -250,7 +246,7 @@ def main(args: Array[String]) {
   mGeo=math.sqrt(TPR*SPC)
   pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
   MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
-  textOut=(textOut + "train," +  nTrees + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
+  textOut=(textOut + "train," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
   PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
   predictions.unpersist()
   println(textOut)
@@ -270,12 +266,12 @@ def main(args: Array[String]) {
   val predLegal = model.transform(legal)
   var predDen = predLegal.select("probability")
   logger.info("..........getting densidity legal...............")
-  val d1= getDenText(predDen,"Legal,"+nTrees+ ","+params,axis,false)
+  val d1= getDenText(predDen,"Legal,"+params._1+ ","+params,axis,true)
   val fraude=trainingData.where("label=1.0")
   val predFraud= model.transform(fraude)
   predDen = predFraud.select("probability")
   logger.info("..........getting densidity fraude...............")
-  val d2= getDenText(predDen,"Fraude,"+nTrees+ ","+params,axis,true)
+  val d2= getDenText(predDen,"Fraude,"+params._1+ ","+params,axis,true)
   txtDendsidad="clase,trees,imp,depth,bines,"+axis.mkString(", ") + "\n"+d1+d2
   val pwdensidad = new PrintWriter(new File(salida+"_denisad.csv" ))
   pwdensidad.write(txtDendsidad)
@@ -283,7 +279,7 @@ def main(args: Array[String]) {
   logger.info("..........termino..............")
 }
 
-}
+ //
 
 }
 sc.stop()
@@ -308,6 +304,7 @@ spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar 
 spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 50 -i gini -d 30 -b 32
 spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta_complete -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 25 -i gini -d 30 -b 32
 
+spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta_complete -p 100 -h 1000 -m 13500m -r 1 -o rf1 -e rfpure -k 5 -t 1,10,25,50,100 -i gini,entropy -d 5,20 -b 32,72
 
 
 
