@@ -17,4 +17,4 @@ import org.apache.spark.mllib.regression.LabeledPoint
 class Metrics(dataSet: DataFrame) extends Serializable {
 
 
-  ]
+}

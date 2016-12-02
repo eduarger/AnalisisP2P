@@ -111,6 +111,10 @@ def main(args: Array[String]) {
   c.copy(depth = x) ).text("depth to evaluate")
   opt[Seq[Int]]('b', "bins").valueName("<bins1>,<bins2>...").action( (x,c) =>
   c.copy(bins = x) ).text("bins to evaluate")
+  opt[Seq[Int]]('a', "axis").valueName("<start>,<end>").action( (x,c) =>
+  c.copy(axes = x) ).text("range of axis of the densidity")
+  opt[String]('f', "filter").action( (x, c) =>
+  c.copy(filter = x) ).text("filters of the tabla of input")
   help("help").text("prints this usage text")
 
 }
@@ -118,7 +122,7 @@ def main(args: Array[String]) {
 // parser.parse returns Option[C]
   parser.parse(args, Config()) match {
   case Some(config) =>
-     @transient private val logger = LogManager.getLogger("analisis")
+     val logger= LogManager.getLogger("analisis")
      logger.setLevel(Level.INFO)
      logger.setLevel(Level.DEBUG)
      Logger.getLogger("org").setLevel(Level.WARN)
@@ -137,6 +141,9 @@ def main(args: Array[String]) {
  	   val memex=config.mex
  	   val memover=config.hmem
  	   val est=config.estrategia
+     val filtros=config.filter
+     val ejesX=config.axes.toArray
+     logger.info("Taking the folliwng filters: "+ filtros)
      logger.info("..........buliding grid of parameters...............")
      val grid = for {
            s <- trees
@@ -156,7 +163,7 @@ def main(args: Array[String]) {
      val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
      import sqlContext.implicits._
      // read the tabla base
-     val db=new DataBase(tablaBase,numPartitions,sqlContext)
+     val db=new DataBase(tablaBase,numPartitions,sqlContext,filtros)
      // if opt==0 the table is readed otherwise the dataframe
      // is calculated from zero
      val labeledDF = db.getDataFrameLabeledLegalFraud(opt=="0").cache()
@@ -164,6 +171,7 @@ def main(args: Array[String]) {
      var textOut2=""
      var textOut3="trees \n"
      var txtDendsidad=""
+     var txtDendsidadAc=""
 
      val labelIndexer = (new StringIndexer()
      .setInputCol("label")
@@ -225,7 +233,7 @@ def main(args: Array[String]) {
    textOut=(textOut + "test," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
       PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
    predictions.unpersist()
-   println(textOut)
+  // println(textOut)
 
   logger.info("..........Calculate Error on Training...............")
   // Make predictions.
@@ -249,7 +257,7 @@ def main(args: Array[String]) {
   textOut=(textOut + "train," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
   PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
   predictions.unpersist()
-  println(textOut)
+  //println(textOut)
   logger.info("..........writing the files...............")
   val pw = new PrintWriter(new File(salida+"Confusion.txt" ))
   pw.write(textOut)
@@ -260,7 +268,8 @@ def main(args: Array[String]) {
   val pw3 = new PrintWriter(new File(salida+"Model.txt" ))
   pw3.write(textOut3)
   pw3.close
-  val axis=(-5d to 5d by 0.1d).toArray
+  // define the x axis
+  val axis=(ejesX(0).toDouble to ejesX(1).toDouble by 0.5d).toArray
   logger.info("..........getting densidity...............")
   val legal=trainingData.where("label=-1.0")
   val predLegal = model.transform(legal)
@@ -273,8 +282,9 @@ def main(args: Array[String]) {
   logger.info("..........getting densidity fraude...............")
   val d2= getDenText(predDen,"Fraude,"+params._1+ ","+params,axis,true)
   txtDendsidad="clase,trees,imp,depth,bines,"+axis.mkString(", ") + "\n"+d1+d2
+  txtDendsidadAc=txtDendsidadAc+ "\n"+ txtDendsidad
   val pwdensidad = new PrintWriter(new File(salida+"_denisad.csv" ))
-  pwdensidad.write(txtDendsidad)
+  pwdensidad.write(txtDendsidadAc)
   pwdensidad.close
   logger.info("..........termino..............")
 }
@@ -282,6 +292,7 @@ def main(args: Array[String]) {
  //
 
 }
+logger.info("..........termino programa..............")
 sc.stop()
 case None =>
     println(".........arguments are bad...............")
@@ -304,7 +315,23 @@ spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar 
 spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 50 -i gini -d 30 -b 32
 spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta_complete -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 25 -i gini -d 30 -b 32
 
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta_complete -p 100 -h 1000 -m 13500m -r 1 -o rf1 -e rfpure -k 5 -t 1,10,25,50,100 -i gini,entropy -d 5,20 -b 32,72
+spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 13500m -r 1 -o rf1 -e rfpure -k 5 -t 1,10,25,50,100 -i gini,entropy -d 10,20,32 -b 32,72
+
+spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 13500m -r 1 -o test1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
+
+
+spark-submit --master yarn --deploy-mode cluster --driver-memory 1g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
+
+spark-submit --driver-memory 1g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
+
+nohup spark-submit a.py > archivo_salida 2>&1&
+nohup spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72 -a -30,30 > archivo_salida 2>&1&
+
+
+nohup spark-submit --driver-memory 6g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 0 -o p1 -e rfpure -k 4 -t 25,50,100 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
+nohup spark-submit --driver-memory 10g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 12000m -r 0 -o p1 -e rfpure -k 4 -t 100 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
+
+nohup spark-submit --num-executors 2 --driver-memory 10g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 12000m -r 0 -o p1 -e rfpure -k 4 -t 2 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
 
 
 
