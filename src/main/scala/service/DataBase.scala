@@ -82,7 +82,7 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
 
   def getDataFrameLabeledLegalFraud(preCal:Boolean):DataFrame={
     val tName=tableBase+"_labeled"
-    val base=dataFrameBase.where("label!=0")
+    val base=dataFrameBase.where("label!=0").where("resp_code=1 or resp_code=2")
     val names = base.columns
     val lon=names.length
     // se definen os atributos que no son variables

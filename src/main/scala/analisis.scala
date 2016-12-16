@@ -1,6 +1,7 @@
 import java.util.Date
 import config.Config
 import service.DataBase
+import service.Metrics
 import java.io._
 import org.apache.log4j.{Level, LogManager, Logger}
 import org.apache.spark.{SparkConf, SparkContext}
@@ -24,36 +25,48 @@ object analisis {
 
   def proRatio(row:org.apache.spark.sql.Row, inv:Boolean):Double ={
     val values=row.getAs[DenseVector](0)
+    val small=0.00001
     val log = {
-      if(inv)
+      if(inv&&values(1)!=0&&values(0)!=0.0)
         math.log(values(1)/values(0))
-      else
+      else if(inv&&values(1)==0&&values(0)!=0.0)
+        math.log(small/values(0))
+      else if(inv&&values(1)!=0&&values(0)==0.0)
+          math.log(values(1)/small)
+      else if(!inv&&values(1)!=0&&values(0)!=0.0)
         math.log(values(0)/values(1))
+      else if(!inv&&values(1)==0&&values(0)!=0.0)
+        math.log(values(0)/small)
+      else if(!inv&&values(1)!=0&&values(0)==0.0)
+        math.log(small/values(1))
+      else
+        math.log(values(1)/values(0))
     }
     log
   }
 
-  def denCal(sample: RDD[Double], bw:Array[Double], x:Array[Double]):Array[Double] ={
+  def denCal(sample: RDD[Double], bw:Double, x:Array[Double]):Array[Double] ={
     var densities=Array[Double]()
-    for (b <- bw )
-    {
       val kd = (new KernelDensity()
       .setSample(sample)
-      .setBandwidth(b))
+      .setBandwidth(bw))
       densities = kd.estimate(x)
+      densities
   }
-    densities
-  }
-// tiene que entrear un dataframe con la probilidad, similar al rwa predcition
+
+  // tiene que entrear un dataframe con la probilidad, similar al rwa predcition
   def getDenText(dataIn:DataFrame,inText:String,ejeX:Array[Double],inv:Boolean):String={
     var out=inText+","
     var coefLR: RDD[Double] = dataIn.rdd.map(row=>{proRatio(row,inv)})
     val x=ejeX
-    val bw= Array(2.0)
+    val n=coefLR.count.toDouble
+    val h=coefLR.stdev*scala.math.pow((4.0/3.0/n),1.0/5.0)
+    val bw=0.1
     val densidad= denCal(coefLR,bw,x)
     out=out+densidad.mkString(", ") + "\n"
     out
       }
+
 // parametros(trees,impurity,depth, bins)
 def trainingRF(dataFrameIn: DataFrame,
     parametros: (Int,String, Int, Int),
@@ -167,7 +180,7 @@ def main(args: Array[String]) {
      // if opt==0 the table is readed otherwise the dataframe
      // is calculated from zero
      val labeledDF = db.getDataFrameLabeledLegalFraud(opt=="0").cache()
-     var textOut="tipo,trees,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1,MGEO,PEXC,MCC \n"
+     var textOut="tipo,trees,tp,fn,tn,fp,SENS,SPC,PRE,ACC,F1,MGEO,PEXC,MCC \n"
      var textOut2=""
      var textOut3="trees \n"
      var txtDendsidad=""
@@ -189,11 +202,9 @@ def main(args: Array[String]) {
      .setLabels(labelIndexer.labels))
 
 
-    for (params <- grid )
-    {
-// for (x <- trees) {
-  // val nTrees=x
-   for( a <- 1 to k){
+     for ( a <- 1 to k)
+     {
+      for(params <- grid){
    logger.info("..........inicinando ciclo con un valor de trees..............."+ params._1)
    println("using(trees,impurity,depth, bins) " + params)
    val Array(trainingData, testData) = labeledDF.randomSplit(Array(0.7, 0.3))
@@ -216,20 +227,19 @@ def main(args: Array[String]) {
    var predictions = model.transform(testData)
    logger.info("..........Calculate Error on test...............")
    predictions.cache()
-   var predRow: RDD[Row]=predictions.select("label", "predictedLabel").rdd
-   var predRDD: RDD[(Double, Double)] = (predRow.map(row=>{(row.getDouble(0), row.getString(1).toDouble)}))
-   var tp=predRDD.filter(r=>r._1== 1.0 && r._2==1.0).count().toDouble
-   var fn=predRDD.filter(r=>r._1== 1.0 && r._2== -1.0).count().toDouble
-   var tn=predRDD.filter(r=>r._1== -1.0 && r._2== -1.0).count().toDouble
-   var fp=predRDD.filter(r=>r._1== -1.0 && r._2== 1.0).count().toDouble
-   var TPR = (tp/(tp+fn))*100.0
-   var SPC = (tn/(fp+tn))*100.0
-   var PPV= (tp/(tp+fp))*100.0
-   var acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
-   var f1= ((2*tp)/(2*tp+fp+fn))*100.0
-   var mGeo=math.sqrt(TPR*SPC)
-   var pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
-   var MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
+   val testMetrics=new Metrics(predictions, Array(1.0,-1.0))
+   var tp=testMetrics.tp
+   var fn=testMetrics.fn
+   var tn=testMetrics.tn
+   var fp=testMetrics.fp
+   var TPR = testMetrics.sens
+   var SPC = testMetrics.spc
+   var PPV= testMetrics.pre
+   var acc= testMetrics.acc
+   var f1= testMetrics.f1
+   var mGeo=testMetrics.mGeo
+   var pExc=testMetrics.pExc
+   var MCC=testMetrics.MCC
    textOut=(textOut + "test," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
       PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
    predictions.unpersist()
@@ -239,24 +249,21 @@ def main(args: Array[String]) {
   // Make predictions.
   predictions = model.transform(trainingData)
   predictions.cache()
-  //TODO: define a Class
-  predRow = predictions.select("label", "predictedLabel").rdd
-  predRDD = (predRow.map(row=>{(row.getDouble(0), row.getString(1).toDouble)}))
-  tp=predRDD.filter(r=>r._1== 1.0 && r._2==1.0).count().toDouble
-  fn=predRDD.filter(r=>r._1== 1.0 && r._2== -1.0).count().toDouble
-  tn=predRDD.filter(r=>r._1== -1.0 && r._2== -1.0).count().toDouble
-  fp=predRDD.filter(r=>r._1== -1.0 && r._2== 1.0).count().toDouble
-  TPR = (tp/(tp+fn))*100.0
-  SPC = (tn/(fp+tn))*100.0
-  PPV= (tp/(tp+fp))*100.0
-  acc= ((tp+tn)/(tp+fn+fp+tn))*100.0
-  f1= ((2*tp)/(2*tp+fp+fn))*100.0
-  mGeo=math.sqrt(TPR*SPC)
-  pExc=(tp*tn-fn*fp)/((fn+tp)*(tn+fp))
-  MCC=(tp*tn-fp*fn)/math.sqrt((fn+tp)*(tn+fp)*(fp+tp)*(fn+tn))
+  val trainMetrics=new Metrics(predictions, Array(1.0,-1.0))
+  tp=trainMetrics.tp
+  fn=trainMetrics.fn
+  tn=trainMetrics.tn
+  fp=trainMetrics.fp
+  TPR = trainMetrics.sens
+  SPC = trainMetrics.spc
+  PPV= trainMetrics.pre
+  acc= trainMetrics.acc
+  f1= trainMetrics.f1
+  mGeo=trainMetrics.mGeo
+  pExc=trainMetrics.pExc
+  MCC=trainMetrics.MCC
   textOut=(textOut + "train," +  params._1 + ","+ tp + "," + fn + "," + tn + "," + fp + "," + TPR + "," + SPC + "," +
   PPV + "," + acc + "," + f1  +  "," +mGeo +  "," + pExc + "," + MCC + "," + params + "\n" )
-  predictions.unpersist()
   //println(textOut)
   logger.info("..........writing the files...............")
   val pw = new PrintWriter(new File(salida+"Confusion.txt" ))
@@ -271,13 +278,11 @@ def main(args: Array[String]) {
   // define the x axis
   val axis=(ejesX(0).toDouble to ejesX(1).toDouble by 0.5d).toArray
   logger.info("..........getting densidity...............")
-  val legal=trainingData.where("label=-1.0")
-  val predLegal = model.transform(legal)
+  val predLegal=predictions.where("label=-1.0")
   var predDen = predLegal.select("probability")
   logger.info("..........getting densidity legal...............")
   val d1= getDenText(predDen,"Legal,"+params._1+ ","+params,axis,true)
-  val fraude=trainingData.where("label=1.0")
-  val predFraud= model.transform(fraude)
+  val predFraud=predictions.where("label=1.0")
   predDen = predFraud.select("probability")
   logger.info("..........getting densidity fraude...............")
   val d2= getDenText(predDen,"Fraude,"+params._1+ ","+params,axis,true)
@@ -286,6 +291,7 @@ def main(args: Array[String]) {
   val pwdensidad = new PrintWriter(new File(salida+"_denisad.csv" ))
   pwdensidad.write(txtDendsidadAc)
   pwdensidad.close
+  predictions.unpersist()
   logger.info("..........termino..............")
 }
 
