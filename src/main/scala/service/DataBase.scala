@@ -10,9 +10,11 @@ import org.apache.spark.sql.{types, _}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer, StringIndexerModel, VectorIndexerModel,VectorAssembler}
-import org.apache.spark.mllib.linalg.{SparseVector, DenseVector,Vectors}
-import org.apache.spark.mllib.regression.LabeledPoint
-
+import org.apache.spark.ml.feature.LabeledPoint
+import org.apache.spark.ml.linalg.{SparseVector, DenseVector,Vectors}
+import org.apache.spark.sql.SparkSession
+import org.apache.hadoop.conf._
+import org.apache.hadoop.fs._
 
 class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: String) extends Serializable {
 
@@ -60,7 +62,8 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
     else
       sqlContext.sql(query).where(filters).coalesce(numP)
     }
-  private val logger = LogManager.getLogger("DataBase")
+  @transient private val logger = LogManager.getLogger("DataBase")
+  private var namesCol: Array[String]=Array[String]()
 
 
   def getDataFrame():DataFrame={
@@ -80,7 +83,7 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
     retorno
   }
 
-  def getDataFrameLabeledLegalFraud(preCal:Boolean):DataFrame={
+  def getDataFrameLabeledLegalFraud(preCal:Boolean, spark: SparkSession):DataFrame={
     val tName=tableBase+"_labeled"
     val base=dataFrameBase.where("label!=0").where("resp_code=1 or resp_code=2")
     val names = base.columns
@@ -90,6 +93,7 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
     val assembler = (new VectorAssembler()
     .setInputCols( for (i <- names if !(ignore contains i )) yield i)
     .setOutputCol("features"))
+    //set the names col
     val retorno={
       if(preCal){
         logger.info("........Reading  "+tName +"..............")
@@ -102,7 +106,7 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
         val rows: RDD[Row] = data.rdd
         val labeledPoints: RDD[LabeledPoint]=(rows.map(row =>{LabeledPoint(row.getInt(2).toDouble,
         row.getAs[SparseVector](lon))}))
-        import sqlContext.implicits._
+        import spark.implicits._
         val labeledDF=labeledPoints.toDF()
         logger.info("........writing  "+tName +"..............")
         labeledDF.write.mode(SaveMode.Overwrite).saveAsTable(tName)
@@ -111,6 +115,29 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
    }
   }
   retorno
+}
+
+def saveFeaturesToCsv(numFiles:Int,rate:Double, path:String, sc:SparkContext):Unit={
+  logger.warn("if the file exists  will be deleted: "+ path)
+  val fs:FileSystem = FileSystem.get(sc.hadoopConfiguration);
+  fs.delete(new Path(path), true)
+  val names = dataFrameBase.columns
+  // se definen os atributos que no son variables
+  val ignore = Array("idn", "label","resp_code","fraude","nolabel").toSeq
+  dataFrameBase
+  .where("label!=0").where("resp_code=1 or resp_code=2")
+  .sample(false, rate)
+  .select(names.filter(c => !ignore.contains(c)).map(c=> new Column(c)): _*)
+  .coalesce(numFiles)
+  .write.format("com.databricks.spark.csv")
+  .option("header", "true")
+  .save(path)
+  logger.info("........Finish the CSV save...............")
+}
+
+
+def getNamesCol():Array[String]={
+  namesCol
 }
 
 }
