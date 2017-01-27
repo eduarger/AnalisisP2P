@@ -4,8 +4,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.ml.feature.LabeledPoint
-import org.apache.spark.ml.linalg.{SparseVector, DenseVector,Vectors,Vector}
+import org.apache.spark.mllib.linalg.{SparseVector, DenseVector,Vectors,Vector}
+import org.apache.spark.mllib.regression.LabeledPoint
 import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.functions._
@@ -95,8 +95,7 @@ class EER()  extends Serializable {
       eer
     }
 
-    def computePlots(trueSet: DataFrame, falseSet: DataFrame, params: (Int,String, Int, Int), k:Int, bins:Int, clase: String, spark: SparkSession):String={
-      import spark.implicits._
+    def computePlots(trueSet: DataFrame, falseSet: DataFrame, params: (Int,String, Int, Int), k:Int, bins:Int, clase: String):String={
       val trueScores=getLikeHoodRatio(trueSet,"probability",true)
       val falseScores=getLikeHoodRatio(falseSet,"probability",true)
       val limits=trueScores.unionAll(falseScores).select(min(col("lr")), max(col("lr"))).collect
@@ -114,8 +113,8 @@ class EER()  extends Serializable {
         yield  (value, numfa(index))
       val histnumFr=for ((value, index) <- x.zipWithIndex)
         yield  (value, numfr(index))
-      var out=histnumFa.mkString(","+k+","+clase+"-fraude,"+params + "\n")+","+k+","+"fraude,"+params+"\n" filterNot ("()" contains _)
-      out=out+histnumFr.mkString(","+k+","+clase+"-legal,"+params + "\n")+","+k+","+"legal,"+params+"\n" filterNot ("()" contains _)
+      var out=histnumFa.mkString(","+k+","+clase+"-fraude,"+params + "\n")+","+k+","+clase+"-fraude,"+params+"\n" filterNot ("()" contains _)
+      out=out+histnumFr.mkString(","+k+","+clase+"-legal,"+params + "\n")+","+k+","+clase+"-legal,"+params+"\n" filterNot ("()" contains _)
       out
     }
 

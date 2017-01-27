@@ -8,19 +8,17 @@ import org.apache.log4j.{Level, LogManager, Logger}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer, StringIndexerModel, VectorIndexerModel,VectorAssembler}
 import org.apache.spark.ml.{Pipeline,PipelineModel}
-import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.ml.feature.LabeledPoint
-import org.apache.spark.ml.linalg.{SparseVector, DenseVector,Vectors}
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.linalg.{SparseVector, DenseVector,Vectors}
 import org.apache.spark.mllib.stat.KernelDensity
 import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
-import org.apache.spark.sql.SparkSession
 
 object analisis {
 
@@ -173,18 +171,15 @@ def main(args: Array[String]) {
      for (a <- grid) println(a)
      //Begin the analysis
      logger.info("Solicitando recursos a Spark")
-     val spark = SparkSession
-       .builder()
-       .appName("AnalisisP2P")
-       .enableHiveSupport()
-       .getOrCreate()
-     val conf = new SparkConf().setAppName("AnalisisP2P")
-     val sqlContext = spark.sqlContext
+     val conf = new SparkConf().setAppName("AnalisisP2P_1.6")
+     val sc = new SparkContext(conf)
+     val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
+     import sqlContext.implicits._
      // read the tabla base
      val db=new DataBase(tablaBase,numPartitions,sqlContext,filtros)
      // if opt==0 the table is readed otherwise the dataframe
      // is calculated from zero
-     val labeledDF = db.getDataFrameLabeledLegalFraud(opt=="0",spark).cache()
+     val labeledDF = db.getDataFrameLabeledLegalFraud(opt=="0").cache()
      val ncol=db.getNamesCol
      var textOut="tipo,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1,MGEO,PEXC,MCC,areaRoc,trees,impurity,depth,bins\n"
      var textImp="variable,importance,impurity,depth,bins\n"
@@ -224,7 +219,7 @@ def main(args: Array[String]) {
      trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter)
    }
    val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
-   spark.sparkContext.parallelize(Seq(rfModel, 1)).saveAsObjectFile("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
+   sc.parallelize(Seq(rfModel, 1)).saveAsObjectFile("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
    val importances=rfModel.featureImportances.toArray.map(_.toString)
    val importancesName=for ((nam, index) <- ncol.zipWithIndex)
          yield  (nam, importances(index))
@@ -278,7 +273,7 @@ def main(args: Array[String]) {
     // saving into file
     saveTxtToFile(txtEER,salida+"_EER.csv")
     logger.info("..........getting EER plots...............")
-    var txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "test", spark)
+    var txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "test")
     txtHist=txtHist+txtEERPlot
     // saving into file
     saveTxtToFile(txtHist,salida+"_EER_Plots.csv")
@@ -325,7 +320,7 @@ def main(args: Array[String]) {
   // saving into file
   saveTxtToFile(txtEER,salida+"_EER.csv")
   logger.info("..........getting EER plots...............")
-  txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "train", spark)
+  txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "train")
   txtHist=txtHist+txtEERPlot
   // saving into file
   saveTxtToFile(txtHist,salida+"_EER_Plots.csv")
@@ -346,7 +341,7 @@ def main(args: Array[String]) {
 
 }
 logger.info("..........termino programa..............")
-spark.stop()
+sc.stop()
 case None =>
     println(".........arguments are bad...............")
 }
