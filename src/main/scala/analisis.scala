@@ -115,8 +115,6 @@ def main(args: Array[String]) {
   c.copy(read = x) ).text("read is parameter that says wich is the base table")
   opt[String]('o', "out").action( (x, c) =>
   c.copy(out = x) ).text("nameof the outfiles")
-  opt[String]('e', "estrategia").action( (x, c) =>
-  c.copy(estrategia = x) ).text("strategy to solve the imbalance(kmeans,meta,smote)")
   opt[Int]('k', "kfolds").action( (x, c) =>
   c.copy(kfolds = x) ).text("kfolds is an integer of num of folds")
   opt[Seq[Int]]('t', "trees").valueName("<trees1>,<trees1>...").action( (x,c) =>
@@ -133,6 +131,8 @@ def main(args: Array[String]) {
   c.copy(axes = x) ).text("range of axis of the densidity")
   opt[String]('f', "filter").action( (x, c) =>
   c.copy(filter = x) ).text("filters of the tabla of input")
+  opt[Boolean]('D', "densidad").valueName("if the densidity and other measure is calculated").action( (x,c) =>
+  c.copy(densidad = x) ).text("depth to evaluate")
   help("help").text("prints this usage text")
 
 }
@@ -156,10 +156,10 @@ def main(args: Array[String]) {
  	   val opt=config.read
  	   val salida=config.out
  	   val imp=config.imp.toArray
- 	   val est=config.estrategia
      val filtros=config.filter
      val ejesX=config.axes.toArray
      val pTrain=config.train
+     val denFlag=config.densidad
      logger.info("Taking the folliwng filters: "+ filtros)
      logger.info("..........buliding grid of parameters...............")
      val grid = for {
@@ -213,18 +213,13 @@ def main(args: Array[String]) {
      for ( a <- 1 to k)
      {
       for(params <- grid){
+   val salidaDir="/files/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a+"/out"
    logger.info("..........inicinando ciclo con un valor de trees..............."+ params._1)
    println("using(trees,impurity,depth, bins) " + params)
    logger.info("............using percetanje for train: " + pTrain +" and testing: " + (1.0-pTrain))
    val Array(trainingData, testData) = labeledDF.randomSplit(Array(pTrain, 1.0-pTrain))
-   var model = {
-   if (est=="rfpure")
-     trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter)
-   else
-     trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter)
-   }
+   var model = trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter)
    val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
-   spark.sparkContext.parallelize(Seq(rfModel, 1)).saveAsObjectFile("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
    val importances=rfModel.featureImportances.toArray.map(_.toString)
    val importancesName=for ((nam, index) <- ncol.zipWithIndex)
          yield  (nam, importances(index))
@@ -253,93 +248,104 @@ def main(args: Array[String]) {
    var MCC=testMetrics.MCC
    // ROC metrics
    val met = new BinaryClassificationMetrics(predictions.select("Predictedlabel", "label").rdd.map(row=>(row.getString(0).toDouble, row.getDouble(1))))
-    // calling the EER class
-    val eer = new EER()
-    textRoc=textRoc+met.roc.collect.mkString(","+a+","+params+"\n")+","+a+","+params+"\n" filterNot ("()" contains _)
-    val aROC=met.areaUnderROC
-    textOut=(textOut + "test," + tp + "," + fn + "," + tn + "," + fp + "," +
+  // calling the EER class
+   val eer = new EER()
+   textRoc=textRoc+met.roc.collect.mkString(","+a+","+params+"\n")+","+a+","+params+"\n" filterNot ("()" contains _)
+   val aROC=met.areaUnderROC
+   textOut=(textOut + "test," + tp + "," + fn + "," + tn + "," + fp + "," +
       TPR + "," + SPC + "," + PPV + "," + acc + "," + f1  +  "," +mGeo +  ","
        + pExc + "," + MCC + "," + aROC + "," + params + "\n"  filterNot ("()" contains _) )
-    logger.info("..........getting densidity for testing...............")
+
     var predLegal = predictions.where("label=-1.0")
-    var predDen = predLegal.select("probability")
-    var d1= getDenText(predDen,"Legal," +params,axis,true,a)
     var predFraud= predictions.where("label=1.0")
-    predDen = predFraud.select("probability")
-    logger.info("..........getting densidity fraude...............")
-    var d2= getDenText(predDen,"Fraude," +params,axis,true,a)
-    txtDensidad=d1+d2
-    txtDensidadAc=txtDensidadAc+txtDensidad
-    // saving into file
-    saveTxtToFile(txtDensidadAc,salida+"_denisad_test.csv")
-    logger.info("..........getting EER for test...............")
-    val eerTest=eer.compute(predFraud,predLegal,0.00001)
-    txtEER=txtEER + a + "," +"test,"+ eerTest + "," + params + "\n" filterNot ("()[]" contains _)
-    // saving into file
-    saveTxtToFile(txtEER,salida+"_EER.csv")
-    logger.info("..........getting EER plots...............")
-    var txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "test", spark)
-    txtHist=txtHist+txtEERPlot
-    // saving into file
-    saveTxtToFile(txtHist,salida+"_EER_Plots.csv")
+    if(denFlag){
+      logger.info("..........getting densidity for testing...............")
+      var predDen = predLegal.select("probability")
+      var d1= getDenText(predDen,"Legal," +params,axis,true,a)
+      predDen = predFraud.select("probability")
+      logger.info("..........getting densidity fraude...............")
+      var d2= getDenText(predDen,"Fraude," +params,axis,true,a)
+      txtDensidad=d1+d2
+      txtDensidadAc=txtDensidadAc+txtDensidad
+      // saving into file
+      saveTxtToFile(txtDensidadAc,salidaDir+"_denisad_test.csv")
+      logger.info("..........getting EER for test...............")
+      val eerTest=eer.compute(predFraud,predLegal,0.00001)
+      txtEER=txtEER + a + "," +"test,"+ eerTest + "," + params + "\n" filterNot ("()[]" contains _)
+      // saving into file
+      saveTxtToFile(txtEER,salidaDir+"_EER.csv")
+      logger.info("..........getting EER plots...............")
+      var txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "test", spark)
+      txtHist=txtHist+txtEERPlot
+      // saving into file
+      saveTxtToFile(txtHist,salidaDir+"_EER_Plots.csv")
+    }
+
+    logger.info("..........saving testScores...............")
+    eer.saveScores(predFraud,predLegal,"scoresTest/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a,spark)
     predictions.unpersist()
-  // println(textOut)
-  logger.info("..........Calculate Error on Training...............")
-  // Make predictions.
-  predictions = model.transform(trainingData)
-  predictions.cache()
-  val trainMetrics=new Metrics(predictions, Array(1.0,-1.0))
-  tp=trainMetrics.tp
-  fn=trainMetrics.fn
-  tn=trainMetrics.tn
-  fp=trainMetrics.fp
-  TPR = trainMetrics.sens
-  SPC = trainMetrics.spc
-  PPV= trainMetrics.pre
-  acc= trainMetrics.acc
-  f1= trainMetrics.f1
-  mGeo=trainMetrics.mGeo
-  pExc=trainMetrics.pExc
-  MCC=trainMetrics.MCC
-  textOut=(textOut + "train," + tp + "," + fn + "," + tn + "," + fp + "," +
+
+    logger.info("..........Calculate Error on Training...............")
+    // Make predictions.
+    predictions = model.transform(trainingData)
+    predictions.cache()
+    val trainMetrics=new Metrics(predictions, Array(1.0,-1.0))
+    tp=trainMetrics.tp
+    fn=trainMetrics.fn
+    tn=trainMetrics.tn
+    fp=trainMetrics.fp
+    TPR = trainMetrics.sens
+    SPC = trainMetrics.spc
+    PPV= trainMetrics.pre
+    acc= trainMetrics.acc
+    f1= trainMetrics.f1
+    mGeo=trainMetrics.mGeo
+    pExc=trainMetrics.pExc
+    MCC=trainMetrics.MCC
+    textOut=(textOut + "train," + tp + "," + fn + "," + tn + "," + fp + "," +
        TPR + "," + SPC + "," + PPV + "," + acc + "," + f1  +  "," +mGeo +  ","
         + pExc + "," + MCC + "," + aROC + "," + params + "\n"  filterNot ("()" contains _) )
-  //println(textOut)
-    // define the x axis
-  logger.info("..........getting densidity for training...............")
-  predLegal = predictions.where("label=-1.0")
-  predDen = predLegal.select("probability")
-  logger.info("..........getting densidity legal...............")
-  d1= getDenText(predDen,"Legal," +params,axis,true,a)
-  predFraud= predictions.where("label=1.0")
-  predDen = predFraud.select("probability")
-  logger.info("..........getting densidity fraude...............")
-  d2= getDenText(predDen,"Fraude," +params,axis,true,a)
-  txtDensidad2=d1+d2
-  txtDensidadAc2=txtDensidadAc2+txtDensidad2
-  // saving into file
-  saveTxtToFile(txtDensidadAc2,salida+"_denisad_train.csv")
-  logger.info("..........getting EER for train...............")
-  val eerTrain=eer.compute(predFraud,predLegal,0.00001)
-  txtEER=txtEER + a + "," +"train,"+ eerTrain + "," + params + "\n" filterNot ("()[]" contains _)
-  // saving into file
-  saveTxtToFile(txtEER,salida+"_EER.csv")
-  logger.info("..........getting EER plots...............")
-  txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "train", spark)
-  txtHist=txtHist+txtEERPlot
-  // saving into file
-  saveTxtToFile(txtHist,salida+"_EER_Plots.csv")
-  predictions.unpersist()
-  logger.info("..........writing the files...............")
-  // saving into file
-  saveTxtToFile(textOut,salida+"Confusion.csv")
+
+    predLegal = predictions.where("label=-1.0")
+    predFraud= predictions.where("label=1.0")
+    if(denFlag){
+      logger.info("..........getting densidity for training...............")
+      var predDen = predLegal.select("probability")
+      logger.info("..........getting densidity legal...............")
+      var d1= getDenText(predDen,"Legal," +params,axis,true,a)
+      predDen = predFraud.select("probability")
+      logger.info("..........getting densidity fraude...............")
+      var d2= getDenText(predDen,"Fraude," +params,axis,true,a)
+      txtDensidad2=d1+d2
+      txtDensidadAc2=txtDensidadAc2+txtDensidad2
+      // saving into file
+      saveTxtToFile(txtDensidadAc2,salidaDir+"_denisad_train.csv")
+      logger.info("..........getting EER for train...............")
+      val eerTrain=eer.compute(predFraud,predLegal,0.00001)
+      txtEER=txtEER + a + "," +"train,"+ eerTrain + "," + params + "\n" filterNot ("()[]" contains _)
+      // saving into file
+      saveTxtToFile(txtEER,salidaDir+"_EER.csv")
+      logger.info("..........getting EER plots...............")
+      var txtEERPlot=eer.computePlots(predFraud,predLegal,params,a,150, "train", spark)
+      txtHist=txtHist+txtEERPlot
+      // saving into file
+      saveTxtToFile(txtHist,salidaDir+"_EER_Plots.csv")
+    }
+    logger.info("..........saving train Scores...............")
+    eer.saveScores(predFraud,predLegal,"scoresTrain/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a, spark)
+    predictions.unpersist()
+    logger.info("..........writing the files...............")
     // saving into file
-  saveTxtToFile(textImp,salida+"Importances.csv")
+    saveTxtToFile(textOut,salidaDir+"Confusion.csv")
     // saving into file
-  saveTxtToFile(textOut3,salida+"Model.txt")
+    saveTxtToFile(textImp,salidaDir+"Importances.csv")
     // saving into file
-  saveTxtToFile(textRoc,salida+"Roc.csv")
-  logger.info("..........termino..............")
+    saveTxtToFile(textOut3,salidaDir+"Model.txt")
+    // saving into file
+    saveTxtToFile(textRoc,salidaDir+"Roc.csv")
+    logger.info("..........writing the model...............")
+    spark.sparkContext.parallelize(Seq(rfModel, 1)).saveAsObjectFile("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
+    logger.info("..........termino..............")
 }
 
  //
@@ -353,76 +359,3 @@ case None =>
 
   }
 }
-/*Aqui!!!!!!!!!!!!!!!!!!!!!!
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta -p 500 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 50 -i gini,entropy -d 30 -b 72
-
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 50 -i gini -d 30 -b 32
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i base_tarjeta_complete -p 100 -h 1000 -m 13500m -r 1 -o testrf1 -e rfpure -k 1 -t 25 -i gini -d 30 -b 32
-
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 13500m -r 1 -o rf1 -e rfpure -k 5 -t 1,10,25,50,100 -i gini,entropy -d 10,20,32 -b 32,72
-
-spark-submit --driver-memory 4g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 13500m -r 1 -o test1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
-
-
-spark-submit --master yarn --deploy-mode cluster --driver-memory 1g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
-
-spark-submit --driver-memory 1g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72
-
-nohup spark-submit a.py > archivo_salida 2>&1&
-nohup spark-submit --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 1 -o p1 -e rfpure -k 4 -t 1,10,25,50,100 -i gini,entropy -d 10,20,30 -b 32,72 -a -30,30 > archivo_salida 2>&1&
-
-
-nohup spark-submit --driver-memory 6g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 10000m -r 0 -o p1 -e rfpure -k 4 -t 25,50,100 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
-nohup spark-submit --driver-memory 10g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 12000m -r 0 -o p1 -e rfpure -k 4 -t 100 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
-
-nohup spark-submit --num-executors 2 --driver-memory 10g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 12000m -r 0 -o p1 -e rfpure -k 4 -t 2 -i gini,entropy -d 10,20,30 -b 32,72 -a -25,25 > archivo_salida 2>&1&
-
-nohup spark-submit --num-executors 3 --driver-memory 10g --class "analisis" AnalisisP2P-assembly-1.0.jar -i variables_finales_tarjeta -p 200 -h 1000 -m 12000m -r 0 -o pbinhigh -e rfpure -k 4 -t 1,2,25,100 -i gini,entropy -d 30 -b 128,384 -a -25,25 > archivo_salida 2>&1&
-
-
-
-opt[String]('i', "in").action( (x, c) =>
-c.copy(in = x) ).text("base table")
-
-  opt[Int]('p', "par").action( (x, c) =>
-    c.copy(par = x) ).text("par is an integer of num of partions")
-
-  opt[String]('r', "read").action( (x, c) =>
-    c.copy(read = x) ).text("read is parameter that says wich is the base table")
-
-  opt[String]('o', "out").action( (x, c) =>
-    c.copy(out = x) ).text("nameof the outfiles")
-
-  opt[Int]('k', "kfolds").action( (x, c) =>
-    c.copy(kfolds = x) ).text("kfolds is an integer of num of folds")
-
-  opt[Seq[Int]]('t', "trees").valueName("<trees1>,<trees1>...").action( (x,c) =>
-    c.copy(trees = x) ).text("trees to evaluate")
-
-  opt[Seq[String]]('i', "imp").valueName("<impurity>,<impurity>...").action( (x,c) =>
-    c.copy(imp = x) ).text("impurity to evaluate")
-
-  opt[Seq[Int]]('d', "depth").valueName("<depth1>,<depth2>...").action( (x,c) =>
-    c.copy(depth = x) ).text("depth to evaluate")
-
-  opt[Seq[Int]]('b', "bins").valueName("<bins1>,<bins2>...").action( (x,c) =>
-    c.copy(bins = x) ).text("bins to evaluate")
-
-  help("help").text("prints this usage text")
-
-  libraryDependencies += "com.github.fommil.netlib" % "all" % "1.1.2"
---repositories "com.github.fommil.netlib" % "all" % "1.1.2"
-
-spark-shell --driver-memory 4g --executor-memory 8g
-
-
-
-
-
-
-
-
-
-
-
-*/

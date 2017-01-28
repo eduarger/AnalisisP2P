@@ -48,6 +48,37 @@ class EER()  extends Serializable {
  }
 
 
+  def rowToValues(row: Row): (Double,Double,Double,Double,Double)={
+    val probs=row.getAs[DenseVector](0)
+    val prozero=probs(0)
+    val proone=probs(1)
+    val lb=row.getDouble(1)
+    val predlb=row.getString(2).toDouble
+    val lr=row.getDouble(3)
+    (prozero,proone,lb,predlb,lr)
+  }
+
+
+ def getDFtoSave(scores:DataFrame, name: String,  names: Array[String], inv :Boolean, spark: SparkSession):DataFrame={
+  val cols=names.map(name => col(name))
+  val res=scores.select(cols : _*).withColumn("lr", sqlProRatio(col(name),lit(inv)))
+  val rddMap = res.rdd.map (row =>{ rowToValues(row) } )
+  import spark.implicits._
+  val redDF=rddMap.toDF("pro_clase0", "pro_clase1", "label", "predictedlabel", "score_lr")
+  redDF
+}
+
+def saveScores(trueSet: DataFrame,falseSet: DataFrame, path: String, spark: SparkSession):Unit={
+  val names=Array("probability", "label", "predictedLabel")
+  val trueScores=getDFtoSave(trueSet,names(0),names, true, spark)
+  val falseScores=getDFtoSave(falseSet,names(0),names, true, spark)
+  val scores = trueScores.union(falseScores).coalesce(1)
+  scores.printSchema()
+  scores.write.mode(SaveMode.Overwrite).option("header", "true").csv(path)
+
+}
+
+
   def compute(trueSet:DataFrame,falseSet:DataFrame, tol:Double):Vector={
     logger.info("..........procesing scores...............")
     val trueScores=(getLikeHoodRatio(trueSet,"probability",true)
@@ -114,8 +145,8 @@ class EER()  extends Serializable {
         yield  (value, numfa(index))
       val histnumFr=for ((value, index) <- x.zipWithIndex)
         yield  (value, numfr(index))
-      var out=histnumFa.mkString(","+k+","+clase+"-fraude,"+params + "\n")+","+k+","+"fraude,"+params+"\n" filterNot ("()" contains _)
-      out=out+histnumFr.mkString(","+k+","+clase+"-legal,"+params + "\n")+","+k+","+"legal,"+params+"\n" filterNot ("()" contains _)
+      var out=histnumFa.mkString(","+k+","+clase+"-fraude,"+params + "\n")+","+k+","+clase+"-fraude,"+params+"\n" filterNot ("()" contains _)
+      out=out+histnumFr.mkString(","+k+","+clase+"-legal,"+params + "\n")+","+k+","+clase+"-legal,"+params+"\n" filterNot ("()" contains _)
       out
     }
 
