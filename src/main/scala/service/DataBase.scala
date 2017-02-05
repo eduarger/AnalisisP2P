@@ -94,10 +94,11 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
     .setInputCols( for (i <- names if !(ignore contains i )) yield i)
     .setOutputCol("features"))
     //set the names col
+    namesCol=assembler.getInputCols
     val retorno={
       if(preCal){
         logger.info("........Reading  "+tName +"..............")
-        sqlContext.sql("SELECT * FROM "+tName).coalesce(numP)
+        sqlContext.sql("SELECT * FROM "+tName).repartition(numP)
 
       } else{
         logger.info("........Converting to features...............")
@@ -111,7 +112,7 @@ class DataBase(tableBase: String,  numP:Int, sqlContext: SQLContext, filters: St
         logger.info("........writing  "+tName +"..............")
         labeledDF.write.mode(SaveMode.Overwrite).saveAsTable(tName)
         logger.info("........Reading  "+tName +"..............")
-        sqlContext.sql("SELECT * FROM "+tName).coalesce(numP)
+        sqlContext.sql("SELECT * FROM "+tName).repartition(numP)
    }
   }
   retorno

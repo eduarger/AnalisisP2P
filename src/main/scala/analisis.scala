@@ -8,7 +8,6 @@ import org.apache.log4j.{Level, LogManager, Logger}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer, StringIndexerModel, VectorIndexerModel,VectorAssembler}
 import org.apache.spark.ml.{Pipeline,PipelineModel}
-import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
@@ -71,7 +70,9 @@ object analisis {
 
       // function to save a string in specific file
    def saveTxtToFile(save:String, file:String): Unit ={
-     val writer = new PrintWriter(new File(file ))
+     val f = new File (file)
+     f.getParentFile().mkdirs()
+     val writer = new PrintWriter(f)
      writer.write(save)
      writer.close
    }
@@ -81,7 +82,8 @@ def trainingRF(dataFrameIn: DataFrame,
     parametros: (Int,String, Int, Int),
     laIndx : StringIndexerModel,
     feIndx: VectorIndexerModel,
-    laConv : IndexToString ) : PipelineModel  = {
+    laConv : IndexToString,
+    maxMemoryInMB: Int ) : PipelineModel  = {
 
   @transient val logger = LogManager.getLogger("analisis")
   logger.info("..........training RF...............")
@@ -92,6 +94,7 @@ def trainingRF(dataFrameIn: DataFrame,
   .setImpurity(parametros._2)
   .setMaxDepth(parametros._3)
   .setMaxBins(parametros._4)
+  .setMaxMemoryInMB(maxMemoryInMB)
   )
    // Chain indexers and forest in a Pipeline
   val pipeline = (new Pipeline()
@@ -133,6 +136,8 @@ def main(args: Array[String]) {
   c.copy(filter = x) ).text("filters of the tabla of input")
   opt[Boolean]('D', "densidad").valueName("if the densidity and other measure is calculated").action( (x,c) =>
   c.copy(densidad = x) ).text("depth to evaluate")
+  opt[Int]('M', "maxMemoryInMB").valueName("Maximum memory in MB").action( (x,c) =>
+  c.copy(maxMemoryInMB = x) ).text("Maximum memory in MB allocated to histogram aggregation")
   help("help").text("prints this usage text")
 
 }
@@ -160,6 +165,7 @@ def main(args: Array[String]) {
      val ejesX=config.axes.toArray
      val pTrain=config.train
      val denFlag=config.densidad
+     val maxMemoryInMB=config.maxMemoryInMB
      logger.info("Taking the folliwng filters: "+ filtros)
      logger.info("..........buliding grid of parameters...............")
      val grid = for {
@@ -178,14 +184,14 @@ def main(args: Array[String]) {
        .appName("AnalisisP2P")
        .enableHiveSupport()
        .getOrCreate()
-     val conf = new SparkConf().setAppName("AnalisisP2P")
+     val conf = new SparkConf().setAppName("AnalisisP2P"+salida)
      val sqlContext = spark.sqlContext
      // read the tabla base
      val db=new DataBase(tablaBase,numPartitions,sqlContext,filtros)
      // if opt==0 the table is readed otherwise the dataframe
      // is calculated from zero
      val labeledDF = db.getDataFrameLabeledLegalFraud(opt=="0",spark).cache()
-     val ncol=db.getNamesCol
+     logger.info("number of partitions of data: " + labeledDF.rdd.getNumPartitions)
      var textOut="tipo,tp,fn,tn,fp,TPR,SPC,PPV,ACC,F1,MGEO,PEXC,MCC,areaRoc,trees,impurity,depth,bins\n"
      var textImp="variable,importance,impurity,depth,bins\n"
      var textOut3=""
@@ -213,19 +219,19 @@ def main(args: Array[String]) {
      for ( a <- 1 to k)
      {
       for(params <- grid){
-   val salidaDir="/files/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a+"/out"
+   val salidaDir="/home/german.melo/files/"+salida+"/"
    logger.info("..........inicinando ciclo con un valor de trees..............."+ params._1)
    println("using(trees,impurity,depth, bins) " + params)
    logger.info("............using percetanje for train: " + pTrain +" and testing: " + (1.0-pTrain))
    val Array(trainingData, testData) = labeledDF.randomSplit(Array(pTrain, 1.0-pTrain))
-   var model = trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter)
+   var model = trainingRF(trainingData,params,labelIndexer,featureIndexer,labelConverter, maxMemoryInMB)
    val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
    val importances=rfModel.featureImportances.toArray.map(_.toString)
+   val ncol=db.getNamesCol
    val importancesName=for ((nam, index) <- ncol.zipWithIndex)
          yield  (nam, importances(index))
    val impSave=importancesName.mkString(","+params+"\n") + ","+params+"\n" filterNot ("()" contains _)
    textImp=textImp+(impSave)
-   textOut3=textOut3 + "---Learned classification forest model" + params._1+ " ---\n" + params + "\n" + rfModel.toDebugString + "\n\n"
    logger.info("..........Testing...............")
    // Make predictions.
    // define the x axis
@@ -340,16 +346,11 @@ def main(args: Array[String]) {
     // saving into file
     saveTxtToFile(textImp,salidaDir+"Importances.csv")
     // saving into file
-    saveTxtToFile(textOut3,salidaDir+"Model.txt")
-    // saving into file
     saveTxtToFile(textRoc,salidaDir+"Roc.csv")
     logger.info("..........writing the model...............")
-    spark.sparkContext.parallelize(Seq(rfModel, 1)).saveAsObjectFile("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
+    model.write.overwrite.save("modelos/"+salida+"/"+params._1+params._2+params._3+params._4+"_"+a)
     logger.info("..........termino..............")
 }
-
- //
-
 }
 logger.info("..........termino programa..............")
 spark.stop()
